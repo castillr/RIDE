@@ -45,7 +45,7 @@ def verify_install():
                          "or pip install wxPython")
         return False
     else:
-        sys.stderr.write("wxPython is installed.\n%s" % version())
+        sys.stderr.write("wxPython is installed.\n%s\n" % version())
         return True
 
 
@@ -139,7 +139,7 @@ def _create_desktop_shortcut_linux(frame=None):
             if not _askyesno("Setup", "Create desktop shortcut?", frame):
                 return False
         roboticon = os.path.dirname(os.path.realpath(__file__)).\
-            replace("postinstall", "widgets/robot.png")
+            replace("postinstall", "widgets/robot.ico")
         with open(link, "w+") as shortcut:
             shortcut.write("#!/usr/bin/env xdg-open\n[Desktop Entry]\nExec="
                            "%s -m robotide.__init__\nComment=A Robot Framework"
@@ -156,8 +156,12 @@ def _create_desktop_shortcut_mac(frame=None):
     import os
     import subprocess
     import pwd
-    user = subprocess.check_output(['logname']).strip()
-    link = os.path.join("/Users", user, "Desktop", "RIDE")
+    if PY2:
+        user = unicode(subprocess.check_output(['logname']).strip())
+    else:
+        user = str(subprocess.check_output(['logname']).strip(),
+                   encoding='utf-8')
+    link = os.path.join("/Users", user, "Desktop", "RIDE.command")
     if not exists(link) or option_f:
         if not option_q and not option_f:
             if not _askyesno("Setup", "Create desktop shortcut?", frame):
@@ -225,7 +229,7 @@ def caller(frame, platform):
     global option_q
     global option_f
     option_q = None
-    option_f = True
+    option_f = frame is not None
     # We don't verify install because called from RIDE
     return create_desktop_shortcut(platform, frame)
 

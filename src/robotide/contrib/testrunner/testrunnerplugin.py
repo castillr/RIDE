@@ -63,21 +63,25 @@ from robotide.action.shortcut import localize_shortcuts
 from robotide.context import IS_WINDOWS, IS_MAC
 from robotide.contrib.testrunner import TestRunner
 from robotide.contrib.testrunner import runprofiles
+from robotide.publish import RideSettingsChanged, PUBLISHER
 from robotide.publish.messages import RideTestSelectedForRunningChanged
 from robotide.pluginapi import Plugin, ActionInfo
 from robotide.widgets import Label, ImageProvider
 from robotide.robotapi import LOG_LEVELS
-from robotide.utils import robottime, is_unicode, PY2, PY3
+from robotide.utils import robottime, is_unicode, PY2
+from robotide.preferences.editors import ReadFonts
 from sys import getfilesystemencoding
-try:
-    from robotide.lib.robot.utils import encoding
-except ImportError:
-    encoding = None
-# if encoding:
-#     encoding.CONSOLE_ENCODING = getfilesystemencoding()
-
-if PY3:
-    from robotide.utils import unicode
+from robotide.lib.robot.utils.encodingsniffer import (get_console_encoding,
+                                                      get_system_encoding)
+CONSOLE_ENCODING = get_console_encoding()
+if PY2 and IS_WINDOWS:
+    SYSTEM_ENCODING = 'mbcs'
+else:
+    SYSTEM_ENCODING = get_system_encoding()
+OUTPUT_ENCODING = getfilesystemencoding()
+encoding = {'CONSOLE': CONSOLE_ENCODING,
+            'SYSTEM': SYSTEM_ENCODING,
+            'OUTPUT': OUTPUT_ENCODING}
 
 # print("DEBUG: TestRunnerPlugin encoding=%s" % encoding)
 
@@ -93,6 +97,7 @@ ID_SHOW_LOG = wx.NewId()
 ID_AUTOSAVE = wx.NewId()
 ID_PAUSE_ON_FAILURE = wx.NewId()
 ID_SHOW_MESSAGE_LOG = wx.NewId()
+STYLE_DEFAULT = 0
 STYLE_STDERR = 2
 
 
@@ -105,12 +110,19 @@ class TestRunnerPlugin(Plugin):
     """A plugin for running tests from within RIDE"""
     defaults = {"auto_save": False,
                 "show_message_log": True,
+                "confirm run": True,
                 "profile": "robot",
                 "sash_position": 200,
                 "runprofiles":
                     [('jybot', 'jybot' + ('.bat' if os.name == 'nt' else '')),
                      ('pybot', 'pybot' + ('.bat' if os.name == 'nt' else '')),
-                     ('robot 3.1', 'robot')]}
+                     ('robot 3.1', 'robot')],
+                "font size": 10,
+                "font face": 'Courier New',
+                "foreground": 'black',
+                "background": 'white',
+                "error": 'red'}
+
     report_regex = re.compile("^Report: {2}(.*\.html)$", re.MULTILINE)
     log_regex = re.compile("^Log: {5}(.*\.html)$", re.MULTILINE)
     title = "Run"
@@ -206,6 +218,17 @@ class TestRunnerPlugin(Plugin):
     def _subscribe_to_events(self):
         self.subscribe(self.OnTestSelectedForRunningChanged,
                        RideTestSelectedForRunningChanged)
+        self.subscribe(self.OnSettingsChanged, RideSettingsChanged)
+
+    def OnSettingsChanged(self, data):
+        '''Updates settings'''
+        section, setting = data.keys
+        # print("DEBUG: enter OnSettingsChanged section %s" % (section))
+        if section == 'Test Run':  # DEBUG temporarily we have two sections
+            # print("DEBUG: setting.get('confirm run')= %s " % setting)
+            # print("DEBUG: new data= %s old %s new %s" % (data.keys, data.old, data.new))
+            self.defaults.setdefault(setting, data.new)
+            self.save_setting(setting, data.new)
 
     def OnTestSelectedForRunningChanged(self, message):
         self._names_to_run = message.tests
@@ -216,12 +239,13 @@ class TestRunnerPlugin(Plugin):
         self.unsubscribe_all()
         self.unregister_actions()
 
-    def OnClose(self, evt):
+    def OnClose(self, event):
         """Shut down the running services and processes"""
         self._test_runner.kill_process()
         if self._process_timer:
             self._process_timer.Stop()
         self._test_runner.shutdown_server()
+        event.Skip()
 
     def OnAutoSaveCheckbox(self, evt):
         """Called when the user clicks on the "Auto Save" checkbox"""
@@ -293,18 +317,23 @@ class TestRunnerPlugin(Plugin):
         if not self._can_start_running_tests():
             return
         #if no tests are selected warn the user, issue #1622
-        if not self.tests_selected():
-            if not self.ask_user_to_run_anyway():
-                # In Linux NO runs dialog 4 times
-                return
+        if self.__getattr__('confirm run'):
+            if not self.tests_selected():
+                if not self.ask_user_to_run_anyway():
+                    # In Linux NO runs dialog 4 times
+                    return
         self._initialize_ui_for_running()
         command = self._create_command()
-        self._output("command: %s\n" % command)  # DEBUG encode
+        if PY2:
+            self._output("command: %s\n" % command)  # DEBUG encode
+        else:
+            self._output("command: %s\n" % command, enc=False)  # DEBUG on Py3 it not shows correct if tags with latin chars
         try:
             if PY2 and IS_WINDOWS:
                 cwd = self._get_current_working_dir()  # DEBUG It fails if a directory has chinese or latin symbols
-                cwd = cwd.encode(encoding.SYSTEM_ENCODING)
-                self._test_runner.run_command(command, cwd)
+                cwd = cwd.encode(encoding['OUTPUT']) # DEBUG SYSTEM_ENCODING
+                # print("DEBUG: encoded cwd: %s" % cwd)
+                self._test_runner.run_command(command.encode(encoding['OUTPUT']), cwd)  # --include Áçãoµ
             else:
                 self._test_runner.run_command(command, self._get_current_working_dir())
             # self._output("DEBUG: Passed test_runner.run_command\n")
@@ -487,8 +516,9 @@ class TestRunnerPlugin(Plugin):
         """
         result = []
         for arg in argv:
-            # if PY2 and is_unicode(arg):
-            #    arg = arg.encode(encoding.OUTPUT_ENCODING)  # DEBUG "utf-8")
+            if PY2 and is_unicode(arg):
+                arg = arg.encode(encoding['SYSTEM'])  # DEBUG "utf-8") CONSOLE_ENCODING
+                # print("DEBUG: PY2 unicode args %s" % arg)
             if "'" in arg or " " in arg or "&" in arg:
                 # for windows, if there are spaces we need to use
                 # double quotes. Single quotes cause problems
@@ -506,7 +536,7 @@ class TestRunnerPlugin(Plugin):
             self._reload_model()
         self.show_tab(self.panel)
 
-    def _AppendText(self, textctrl, string, source="stdout"):
+    def _AppendText(self, textctrl, string, source="stdout", enc=True):
         if not self.panel or not textctrl:
             return
         textctrl.update_scroll_width(string)
@@ -518,16 +548,28 @@ class TestRunnerPlugin(Plugin):
 
         textctrl.SetReadOnly(False)
         try:
-            if PY2:
-                # textctrl.AppendText(string.encode(encoding.OUTPUT_ENCODING)) # DEBUG encoding.CONSOLE_ENCODING))  # DEBUG 'utf-8'))
-                textctrl.AppendText(string.encode('utf-8'))  # encoding.SYSTEM_ENCODING))
+            if enc:
+                textctrl.AppendText(string.encode(encoding['SYSTEM']))
             else:
-                textctrl.AppendText(str(string))  # DEBUG
+                textctrl.AppendText(string)
+            # print("DEBUG _AppendText Printed OK")
         except UnicodeDecodeError as e:
             # I'm not sure why I sometimes get this, and I don't know what I
             # can do other than to ignore it.
-            textctrl.AppendTextRaw(bytes(string))  # DEBUG .encode('utf-8'))
-            # print("DEBUG UnicodeDecodeError appendtext string=%s\n" % string)
+            if PY2:
+                if is_unicode(string):
+                    textctrl.AppendTextRaw(bytes(string.encode('utf-8')))
+                else:
+                    textctrl.AppendTextRaw(string)
+            else:
+                textctrl.AppendTextRaw(bytes(string, encoding['SYSTEM']))  # DEBUG .encode('utf-8'))
+            # print(r"DEBUG UnicodeDecodeError appendtext string=%s\n" % string)
+            pass
+        except UnicodeEncodeError as e:
+            # I'm not sure why I sometimes get this, and I don't know what I
+            # can do other than to ignore it.
+            textctrl.AppendText(string.encode('utf-8'))  # DEBUG .encode('utf-8'))
+            # print(r"DEBUG UnicodeDecodeError appendtext string=%s\n" % string)
             pass
             #  raise  # DEBUG
 
@@ -572,9 +614,9 @@ class TestRunnerPlugin(Plugin):
         self.config_panel = panel
         return panel
 
-    def _output(self, string, source="stdout"):
+    def _output(self, string, source="stdout", enc=True):
         """Put output to the text control"""
-        self._AppendText(self.out, string, source)
+        self._AppendText(self.out, string, source, enc)
 
     def _build_runner_toolbar(self):
         toolbar = wx.ToolBar(self.panel, wx.ID_ANY,
@@ -766,14 +808,7 @@ class TestRunnerPlugin(Plugin):
 
     def _create_output_textctrl(self):
         textctrl = OutputStyledTextCtrl(self._right_panel)
-        font = self._create_font()
-        face = font.GetFaceName()
-        size = font.GetPointSize()
-        textctrl.SetFont(font)
-        # textctrl.StyleSetFontEncoding(wx.stc.STC_STYLE_DEFAULT, wx.FONTENCODING_SYSTEM)  # DEBUG Chinese wx.FONTENCODING_CP936)
-        textctrl.StyleSetSpec(wx.stc.STC_STYLE_DEFAULT, "face:%s,size:%d" %
-                              (face, size))
-        textctrl.StyleSetSpec(STYLE_STDERR, "fore:#b22222")  # firebrick
+        # textctrl.StyleSetFontEncoding(wx.stc.STC_STYLE_DEFAULT, wx.FONTENCODING_CP936)  # DEBUG Chinese wx.) wx.FONTENCODING_SYSTEM
         textctrl.SetScrollWidth(100)
         self._set_margins(textctrl)
         textctrl.SetReadOnly(True)
@@ -785,15 +820,6 @@ class TestRunnerPlugin(Plugin):
         out.SetMarginWidth(1, 0)
         out.SetMarginWidth(2, 0)
         out.SetMarginWidth(3, 0)
-
-    def _create_font(self):
-        font=wx.SystemSettings.GetFont(wx.SYS_ANSI_FIXED_FONT)  # DEBUG ) .SYS_OEM_FIXED_FONT)SYS_SYSTEM_FONT SYS_ANSI_FIXED_FONT
-        if font.IsFixedWidth() and font.GetPointSize() > 11:  # DEBUG was not
-            # fixed width fonts are typically a little bigger than their
-            # variable width peers so subtract one from the point size.
-            font = wx.Font(font.GetPointSize()-1, wx.FONTFAMILY_MODERN,
-                           wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        return font
 
     def _post_result(self, event, *args):
         """Endpoint of the listener interface
@@ -993,6 +1019,7 @@ class OutputStyledTextCtrl(wx.stc.StyledTextCtrl):
     def __init__(self, parent):
         wx.stc.StyledTextCtrl.__init__(self, parent, wx.ID_ANY,
                                        style=wx.SUNKEN_BORDER)
+        self.stylizer = OutputStylizer(self, parent.GetParent().GetParent()._app.settings)
         self._max_row_len = 0
 
     def update_scroll_width(self, string):
@@ -1010,12 +1037,56 @@ class OutputStyledTextCtrl(wx.stc.StyledTextCtrl):
             pass
 
 
+class OutputStylizer(object):
+    def __init__(self, editor, settings):
+        self.editor = editor
+        self.settings = settings._config_obj['Plugins']['Test Runner']
+        self._ensure_default_font_is_valid()
+        self._set_styles()
+        PUBLISHER.subscribe(self.OnSettingsChanged, RideSettingsChanged)
+
+    def OnSettingsChanged(self, data):
+        '''Redraw colors and font if settings are modified'''
+        section, setting = data.keys
+        if section == 'Test Runner':
+            self._set_styles()
+
+    def _set_styles(self):
+        '''Sets plugin styles'''
+        background = self.settings.get('background', 'white')
+        font_size = self.settings.get('font size', 10)
+        font_face = self.settings.get('font face', 'Courier New')
+
+        default_style = self._get_style_string(
+            fore=self.settings.get('foreground', 'black'), back=background,
+            size=font_size, face=font_face)
+        error_style = self._get_style_string(
+            fore=self.settings.get('error', 'red'), back=background,
+            size=font_size, face=font_face)
+
+        self.editor.StyleSetSpec(STYLE_DEFAULT, default_style)
+        self.editor.StyleSetSpec(STYLE_STDERR, error_style)
+        self.editor.StyleSetSpec(7, error_style)
+        self.editor.StyleSetBackground(wx.stc.STC_STYLE_DEFAULT, background)
+        self.editor.Refresh()
+
+    def _get_style_string(self, back, fore, size, face):
+        return ','.join('%s:%s' % (name, value)
+                        for name, value in locals().items() if value)
+
+    def _ensure_default_font_is_valid(self):
+        '''Checks if default font is installed'''
+        default_font = self.settings.get('font face')
+        if default_font not in ReadFonts():
+            sys_font = wx.SystemSettings.GetFont(wx.SYS_ANSI_FIXED_FONT)
+            self.settings['font face'] = sys_font.GetFaceName()
+
+
 # stole this off the internet. Nifty.
 def secondsToString(t):
     """Convert a number of seconds to a string of the form HH:MM:SS"""
     return "%d:%02d:%02d" % \
-        reduce(lambda ll,b : divmod(ll[0],b) + ll[1:],
-            [(t,),60, 60])
+        reduce(lambda ll, b: divmod(ll[0], b) + ll[1:], [(t,), 60, 60])
 
 
 Robot = PyEmbeddedImage(

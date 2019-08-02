@@ -13,11 +13,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+import os
 import wx
 import wx.lib.agw.aui as aui
 from wx import Icon
 from wx.lib.agw.aui import aui_switcherdialog as ASD
-
+from robotide.lib.robot.utils.compat import with_metaclass
 from robotide.action import ActionInfoCollection, ActionFactory, SeparatorInfo
 from robotide.context import ABOUT_RIDE, SHORTCUT_KEYS
 from robotide.controller.ctrlcommands import SaveFile, SaveAll
@@ -138,8 +139,7 @@ class SizeReportCtrl(wx.Control):
         self.Refresh()
 
 
-class RideFrame(wx.Frame, RideEventHandler):
-    __metaclass__ = classmaker()
+class RideFrame(with_metaclass(classmaker(), wx.Frame, RideEventHandler)):
 
     def __init__(self, application, controller):
         size = application.settings.get('mainframe size', (1100, 700))
@@ -163,6 +163,10 @@ class RideFrame(wx.Frame, RideEventHandler):
             self.Maximize()
         self._application = application
         self._controller = controller
+        self.favicon = Icon(os.path.join(os.path.dirname(__file__), "..",
+                                         "widgets","robot.ico"),
+                            wx.BITMAP_TYPE_ICO, 256, 256)
+        self.SetIcon(self.favicon)
         self._init_ui()
         self._plugin_manager = PluginManager(self.notebook)
         self._review_dialog = None
@@ -171,6 +175,7 @@ class RideFrame(wx.Frame, RideEventHandler):
         self.Bind(wx.EVT_SIZE, self.OnSize)
         self.Bind(wx.EVT_MOVE, self.OnMove)
         self.Bind(wx.EVT_MAXIMIZE, self.OnMaximize)
+        self.Bind(wx.EVT_DIRCTRL_FILEACTIVATED, self.OnOpenFile)
         self._subscribe_messages()
         #print("DEBUG: Call register_tools, actions: %s" % self.actions.__repr__())
         if PY2:
@@ -215,7 +220,7 @@ class RideFrame(wx.Frame, RideEventHandler):
         ##### self.splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
         # self._mgr.AddPane(wx.Panel(self), aui.AuiPaneInfo().CenterPane())
         # set up default notebook style
-        self._notebook_style = aui.AUI_NB_DEFAULT_STYLE |\
+        self._notebook_style = aui.AUI_NB_DEFAULT_STYLE | \
                                aui.AUI_NB_TAB_EXTERNAL_MOVE | wx.NO_BORDER
         # TODO self._notebook_theme = 0 (allow to select themes for notebooks)
         # self.notebook = NoteBook(self.splitter, self._application,
@@ -275,6 +280,15 @@ class RideFrame(wx.Frame, RideEventHandler):
         # MaximizeButton(True).MinimizeButton(True))
         self.actions.register_actions(
             ActionInfoCollection(_menudata, self, self.tree))
+        ###### File explorer pane
+        self.filemgr = wx.GenericDirCtrl(self, -1, size=(200, 225),
+                                         style=wx.DIRCTRL_3D_INTERNAL)
+        self.filemgr.SetMinSize(wx.Size(120, 200))
+        self._mgr.AddPane(self.filemgr,
+                          aui.AuiPaneInfo().Name("file_manager").
+                          Caption("Files").LeftDockable(True).
+                          CloseButton(True))
+
         mb.take_menu_bar_into_use()
         #### self.splitter.SetMinimumPaneSize(100)
         #### self.splitter.SplitVertically(self.tree, self.notebook, 300)
@@ -282,7 +296,6 @@ class RideFrame(wx.Frame, RideEventHandler):
         self.SetIcons(ImageProvider().PROGICONS)
         # tell the manager to "commit" all the changes just made
         self._mgr.Update()
-
 
     def testToolbar(self):
 
@@ -406,6 +419,36 @@ class RideFrame(wx.Frame, RideEventHandler):
 
     def _populate_tree(self):
         self.tree.populate(self._controller)
+        if len(self._controller.data.directory) > 1:
+            self.filemgr.SelectPath(self._controller.data.source)
+            try:
+                self.filemgr.ExpandPath(self._controller.data.source)
+            except Exception:
+                pass
+            self.filemgr.Update()
+
+    def OnOpenFile(self, event):
+        # EVT_DIRCTRL_FILEACTIVATED
+        from os.path import splitext
+        robottypes = self._application.settings.get('robot types', ['robot',
+                                                                    'resource'
+                                                                    'txt',
+                                                                    'tsv',
+                                                                    'html'])
+        path = self.filemgr.GetFilePath()
+        ext = splitext(path)
+        ext = ext[1].replace('.', '')
+        # print("DEBUG: path %s ext %s" % (path, ext))
+        if ext in robottypes:
+            if not self.check_unsaved_modifications():
+                return
+            try:
+                self.open_suite(path)
+                return
+            except UserWarning as e:
+                pass
+        from robotide.editor import customsourceeditor
+        customsourceeditor.main(path)
 
     def OnOpenTestSuite(self, event):
         if not self.check_unsaved_modifications():
@@ -413,7 +456,13 @@ class RideFrame(wx.Frame, RideEventHandler):
         path = RobotFilePathDialog(
             self, self._controller, self._application.settings).execute()
         if path:
-            self.open_suite(path)
+            try:
+                self.open_suite(path)
+                return
+            except UserWarning as e:
+                pass
+            from robotide.editor import customsourceeditor
+            customsourceeditor.main(path)
 
     def check_unsaved_modifications(self):
         if self.has_unsaved_changes():
@@ -425,7 +474,9 @@ class RideFrame(wx.Frame, RideEventHandler):
 
     def open_suite(self, path):
         self._controller.update_default_dir(path)
-        self._controller.load_datafile(path, LoadProgressObserver(self))
+        err = self._controller.load_datafile(path, LoadProgressObserver(self))
+        if isinstance(err, UserWarning):
+            raise err
         self._populate_tree()
 
     def refresh_datafile(self, item, event):
@@ -523,8 +574,8 @@ class RideFrame(wx.Frame, RideEventHandler):
     def _refresh(self):
         self._controller.update_namespace()
 
-# This code is copied from http://wiki.wxpython.org/EnsureFrameIsOnScreen,
-# and adapted to fit our code style.
+    # This code is copied from http://wiki.wxpython.org/EnsureFrameIsOnScreen,
+    # and adapted to fit our code style.
     def ensure_on_screen(self):
         try:
             display_id = wx.Display.GetFromWindow(self)

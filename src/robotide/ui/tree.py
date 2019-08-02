@@ -23,6 +23,7 @@ except ImportError:
     from wx import Colour
     TREETEXTCOLOUR = Colour(0xA9, 0xA9, 0xA9)  # wxPython 3.0.2
 
+from robotide.lib.robot.utils.compat import with_metaclass
 from robotide.controller.ui.treecontroller import TreeController, \
     TestSelectionController
 from robotide.context import IS_WINDOWS
@@ -63,13 +64,13 @@ if wx.VERSION >= (3, 0, 3, ''):
 if IS_WINDOWS:
     _TREE_ARGS['style'] |= wx.TR_EDIT_LABELS
 
-
 # Metaclass fix from http://code.activestate.com/recipes/204197-solving-the-metaclass-conflict/
 from robotide.utils.noconflict import classmaker
-class Tree(treemixin.DragAndDrop, customtreectrl.CustomTreeCtrl,
-           utils.RideEventHandler):
-    __metaclass__ = classmaker()
 
+
+class Tree(with_metaclass(classmaker(), treemixin.DragAndDrop,
+                          customtreectrl.CustomTreeCtrl,
+                          utils.RideEventHandler)):
     _RESOURCES_NODE_LABEL = 'External Resources'
 
     def __init__(self, parent, action_registerer, settings=None):
@@ -470,9 +471,10 @@ class Tree(treemixin.DragAndDrop, customtreectrl.CustomTreeCtrl,
 
     def _leaf_item_removed(self, message):
         node = self._controller.find_node_by_controller(message.item)
-        parent_node = self._get_datafile_node(message.datafile)  # DEBUG
-        self._test_selection_controller.select(message.item, False)
-        self._controller.mark_node_dirty(parent_node) # DEBUG
+        parent_node = self._get_datafile_node(message.datafile)
+        # DEBUG The below call causes not calling delete_node
+        # self._test_selection_controller.select(message.item, False)
+        self._controller.mark_node_dirty(parent_node)
         self.delete_node(node)
 
     def _test_added(self, message):
@@ -864,8 +866,7 @@ class Tree(treemixin.DragAndDrop, customtreectrl.CustomTreeCtrl,
         target = self._controller.get_handler(target)
         if target and target.accepts_drag(dragged):
             dragged.controller.execute(MoveTo(target.controller))
-        else:
-            self.Refresh()
+        self.Refresh()  # DEBUG Always refresh
 
     def IsValidDragItem(self, item):
         return self._controller.get_handler(item).is_draggable
@@ -971,7 +972,7 @@ class TreeLabelEditListener(object):
 
     def _stop_editing(self):
         control = self._tree.GetEditControl()
-        if control:
+        if control and wx.Window.FindFocus():
             control.StopEditing()
 
     def OnDelete(self, event):
